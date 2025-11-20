@@ -30,6 +30,7 @@ TEST_ENCRYPTED="$TEST_ARCHIVE.gpg"
 
 require_binaries
 prepare_gpg_material
+ensure_recipient_available
 build_src_targets
 mkdir -p "$(dirname "$TEST_ARCHIVE")"
 

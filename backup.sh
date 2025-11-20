@@ -347,6 +347,12 @@ prepare_gpg_material() {
   GPG_ENCRYPT_TARGET=$(determine_gpg_recipient)
 }
 
+ensure_recipient_available() {
+  if ! gpg --list-keys "$GPG_ENCRYPT_TARGET" >/dev/null 2>&1; then
+    fail "GPG key not available after import attempts for recipient: $GPG_ENCRYPT_TARGET"
+  fi
+}
+
 build_src_targets() {
   SRC_TARGETS=()
   local resolved_base=""
@@ -483,6 +489,7 @@ main() {
   trap 'handle_error $? $LINENO' ERR
   require_binaries
   prepare_gpg_material
+  ensure_recipient_available
   build_src_targets
   prepare_workspace
   create_archive
