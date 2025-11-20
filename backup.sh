@@ -12,14 +12,9 @@ fi
 # shellcheck disable=SC1090
 source "$CONF_FILE"
 
+: "${GPG_KEY_SOURCE:=auto}"
 AUTO_INSTALL_MISSING_BINS=${AUTO_INSTALL_MISSING_BINS:-false}
 PACKAGE_MANAGER_OVERRIDE=${PACKAGE_MANAGER_OVERRIDE:-}
-
-LOG_FILE=${LOG_FILE:-$SCRIPT_DIR/logs/lndb.log}
-mkdir -p "$(dirname "$LOG_FILE")"
-
-touch "$LOG_FILE"
-exec 3>>"$LOG_FILE"
 
 log() {
   local level=$1; shift
@@ -39,10 +34,20 @@ handle_error() {
   local line=$2
   fail "backup failed at line $line (exit $exit_code)"
 }
-
-trap 'handle_error $? $LINENO' ERR
-
+ 
 INSTALL_SUDO=""
+GPG_ENCRYPT_TARGET=""
+DOWNLOAD_TOOL=""
+SRC_TARGETS=()
+
+setup_logging() {
+  LOG_FILE=${LOG_FILE:-$SCRIPT_DIR/logs/lndb.log}
+  if [[ "$LOG_FILE" != "/dev/null" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
+  fi
+  exec 3>>"$LOG_FILE"
+}
 
 setup_install_privilege() {
   if (( EUID == 0 )); then
@@ -195,6 +200,193 @@ install_missing_binaries() {
   run_install_command "$mgr" "${packages[@]}"
 }
 
+resolve_path() {
+  local raw=$1
+  [[ -z "$raw" ]] && return 0
+  local expanded
+  expanded=$(eval "printf '%s' \"$raw\"")
+  printf '%s\n' "$expanded"
+}
+
+determine_gpg_recipient() {
+  if [[ -n "$GPG_RECIPIENT_FINGERPRINT" ]]; then
+    echo "$GPG_RECIPIENT_FINGERPRINT"
+    return
+  fi
+  if [[ -n "$GPG_RECIPIENT" ]]; then
+    echo "$GPG_RECIPIENT"
+    return
+  fi
+  fail "configure GPG_RECIPIENT or GPG_RECIPIENT_FINGERPRINT for encryption"
+}
+
+determine_key_fetch_id() {
+  if [[ -n "$GPG_KEY_ID" ]]; then
+    echo "$GPG_KEY_ID"
+    return
+  fi
+  if [[ -n "$GPG_RECIPIENT_FINGERPRINT" ]]; then
+    echo "$GPG_RECIPIENT_FINGERPRINT"
+    return
+  fi
+  if [[ -n "$GPG_RECIPIENT" ]]; then
+    echo "$GPG_RECIPIENT"
+    return
+  fi
+  fail "unable to determine key identifier for fetch"
+}
+
+import_gpg_key_from_file() {
+  local file=$1
+  [[ -z "$file" ]] && return 0
+  [[ -f "$file" ]] || fail "GPG_PUBLIC_KEY_FILE not found: $file"
+  log "INFO" "importing GPG key from file $file"
+  gpg --batch --yes --import "$file"
+}
+
+ensure_download_tool() {
+  if command -v curl >/dev/null 2>&1; then
+    DOWNLOAD_TOOL="curl"
+    return
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    DOWNLOAD_TOOL="wget"
+    return
+  fi
+  if [[ "$AUTO_INSTALL_MISSING_BINS" == "true" ]]; then
+    install_missing_binaries curl
+    if command -v curl >/dev/null 2>&1; then
+      DOWNLOAD_TOOL="curl"
+      return
+    fi
+    install_missing_binaries wget
+    if command -v wget >/dev/null 2>&1; then
+      DOWNLOAD_TOOL="wget"
+      return
+    fi
+  fi
+  fail "curl or wget is required to download GPG keys via URL"
+}
+
+download_key_from_url() {
+  local url=$1
+  local dest=$2
+  ensure_download_tool
+  log "INFO" "downloading GPG key from URL $url"
+  case "$DOWNLOAD_TOOL" in
+    curl)
+      curl -fsSL "$url" -o "$dest"
+      ;;
+    wget)
+      wget -qO "$dest" "$url"
+      ;;
+    *)
+      fail "unsupported download tool: $DOWNLOAD_TOOL"
+      ;;
+  esac
+}
+
+import_gpg_key_from_url() {
+  local url=$1
+  [[ -z "$url" ]] && return 0
+  local tmp
+  tmp=$(mktemp)
+  download_key_from_url "$url" "$tmp"
+  gpg --batch --yes --import "$tmp"
+  rm -f "$tmp"
+}
+
+fetch_gpg_key_from_server() {
+  local server=$1
+  [[ -z "$server" ]] && return 0
+  local key_id
+  key_id=$(determine_key_fetch_id)
+  log "INFO" "fetching GPG key $key_id from keyserver $server"
+  gpg --keyserver "$server" --recv-keys "$key_id"
+}
+
+perform_gpg_key_import() {
+  local source=${GPG_KEY_SOURCE:-auto}
+  local normalized
+  normalized=$(echo "$source" | tr '[:upper:]' '[:lower:]')
+  case "$normalized" in
+    existing|"")
+      log "INFO" "GPG_KEY_SOURCE=$source, assuming key already imported"
+      ;;
+    file)
+      [[ -n "$GPG_PUBLIC_KEY_FILE" ]] || fail "set GPG_PUBLIC_KEY_FILE when GPG_KEY_SOURCE=file"
+      import_gpg_key_from_file "$GPG_PUBLIC_KEY_FILE"
+      ;;
+    keyserver)
+      [[ -n "$GPG_KEYSERVER" ]] || fail "set GPG_KEYSERVER when GPG_KEY_SOURCE=keyserver"
+      fetch_gpg_key_from_server "$GPG_KEYSERVER"
+      ;;
+    url)
+      [[ -n "$GPG_KEY_URL" ]] || fail "set GPG_KEY_URL when GPG_KEY_SOURCE=url"
+      import_gpg_key_from_url "$GPG_KEY_URL"
+      ;;
+    auto)
+      if [[ -n "$GPG_PUBLIC_KEY_FILE" ]]; then
+        import_gpg_key_from_file "$GPG_PUBLIC_KEY_FILE"
+      elif [[ -n "$GPG_KEYSERVER" ]]; then
+        fetch_gpg_key_from_server "$GPG_KEYSERVER"
+      elif [[ -n "$GPG_KEY_URL" ]]; then
+        import_gpg_key_from_url "$GPG_KEY_URL"
+      else
+        log "INFO" "GPG_KEY_SOURCE=auto with no import inputs; assuming key already imported"
+      fi
+      ;;
+    *)
+      fail "unsupported GPG_KEY_SOURCE: $GPG_KEY_SOURCE"
+      ;;
+  esac
+}
+
+prepare_gpg_material() {
+  perform_gpg_key_import
+  GPG_ENCRYPT_TARGET=$(determine_gpg_recipient)
+}
+
+build_src_targets() {
+  SRC_TARGETS=()
+  local resolved_base=""
+  if [[ -n "${BASE_CHAIN_DIR:-}" ]]; then
+    resolved_base=$(resolve_path "$BASE_CHAIN_DIR")
+    resolved_base=${resolved_base%/}
+  fi
+
+  local need_base=0
+  if [[ ${RELATIVE_FILE_TARGETS[@]+_} ]]; then
+    (( ${#RELATIVE_FILE_TARGETS[@]} )) && need_base=1
+  fi
+  if [[ ${RELATIVE_DIR_TARGETS[@]+_} ]]; then
+    (( ${#RELATIVE_DIR_TARGETS[@]} )) && need_base=1
+  fi
+  if (( need_base )) && [[ -z "$resolved_base" ]]; then
+    fail "BASE_CHAIN_DIR must be set when using relative targets"
+  fi
+
+  local rel
+  if [[ ${RELATIVE_FILE_TARGETS[@]+_} ]]; then
+    for rel in "${RELATIVE_FILE_TARGETS[@]}"; do
+      [[ -z "$rel" ]] && continue
+      SRC_TARGETS+=("$resolved_base/${rel#/}")
+    done
+  fi
+  if [[ ${RELATIVE_DIR_TARGETS[@]+_} ]]; then
+    for rel in "${RELATIVE_DIR_TARGETS[@]}"; do
+      [[ -z "$rel" ]] && continue
+      SRC_TARGETS+=("$resolved_base/${rel#/}")
+    done
+  fi
+  if [[ ${EXTRA_TARGETS[@]+_} ]]; then
+    for rel in "${EXTRA_TARGETS[@]}"; do
+      [[ -z "$rel" ]] && continue
+      SRC_TARGETS+=("$(resolve_path "$rel")")
+    done
+  fi
+}
+
 require_binaries() {
   local missing=()
   local bin
@@ -226,14 +418,17 @@ prepare_workspace() {
 }
 
 create_archive() {
+  if [[ -z "${SRC_TARGETS[*]:-}" ]]; then
+    fail "SRC_TARGETS is empty; configure at least one path to back up"
+  fi
   log "INFO" "creating tarball at $TMP_ARCHIVE"
-  tar -czf "$TMP_ARCHIVE" --absolute-names "${SRC_DIRS[@]}"
+  tar -czf "$TMP_ARCHIVE" --absolute-names "${SRC_TARGETS[@]}"
 }
 
 encrypt_archive() {
-  log "INFO" "encrypting archive for recipient $GPG_RECIPIENT"
+  log "INFO" "encrypting archive for recipient $GPG_ENCRYPT_TARGET"
   gpg --batch --yes --trust-model always \
-      --recipient "$GPG_RECIPIENT" \
+      --recipient "$GPG_ENCRYPT_TARGET" \
       --output "$TMP_ENCRYPTED" \
       --encrypt "$TMP_ARCHIVE"
 }
@@ -284,7 +479,11 @@ cleanup() {
 }
 
 main() {
+  setup_logging
+  trap 'handle_error $? $LINENO' ERR
   require_binaries
+  prepare_gpg_material
+  build_src_targets
   prepare_workspace
   create_archive
   encrypt_archive
@@ -297,4 +496,6 @@ main() {
   log "INFO" "backup completed successfully"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

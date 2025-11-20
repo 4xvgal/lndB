@@ -8,7 +8,7 @@
 - **Project Name:** lndB
 - **Goal:** Build a Zero-Knowledge Backup system that enforces the 3-2-1 rule using bash automation, cron schedules, and PGP asymmetric encryption across local, mounted, and remote/cloud targets with multi-stage alerting.
 - **Key Technologies:** bash, cron, gpg, tar, gzip, scp/ssh, optional cloud CLIs (S3/B2/R2/etc.), Docker compatibility (Alpine-first mindset).
-- **Primary Dataset:** LND node data (`/var/lib/lnd`, `/etc/lnd`, extendable via `SRC_DIRS`).
+- **Primary Dataset:** LND node data such as `channel.backup`, `chan-backup-archives/`, and `wallet.db` (customizable via `BASE_CHAIN_DIR`, `RELATIVE_FILE_TARGETS`, `RELATIVE_DIR_TARGETS`, and `EXTRA_TARGETS`).
 
 ## 2. Requirements Overview
 
@@ -50,6 +50,10 @@
 - Central config file `lndb.conf`.
 - Logs at `/var/log/lndb.log` with future logrotate option.
 - Optional automatic package installation (`AUTO_INSTALL_MISSING_BINS`, `PACKAGE_MANAGER_OVERRIDE`) for missing binaries.
+- Backup targets stay tidy via `BASE_CHAIN_DIR` plus `RELATIVE_FILE_TARGETS`, `RELATIVE_DIR_TARGETS`, and optional `EXTRA_TARGETS`.
+- Manual trigger helper `trigger_backup.sh` provides `TRIGGER_MODE` control to run locally, request a systemd unit (`SYSTEMD_UNIT_NAME`), or signal a long-lived daemon (`DAEMON_PID_FILE`, `DAEMON_SIGNAL`).
+- `test_encrypt.sh` exercises compression + encryption only so you can validate artifacts before enabling remote transfers (`TEST_WORK_DIR`, `TEST_LOG_FILE` tunable).
+- Crypto inputs allow multiple key provisioning paths via `GPG_KEY_SOURCE` (`existing`, `file`, `keyserver`, `url`, or `auto`) plus helpers such as `GPG_PUBLIC_KEY_FILE`, `GPG_KEY_URL`, `GPG_KEYSERVER`, `GPG_KEY_ID`, and `GPG_RECIPIENT_FINGERPRINT`.
 - Supported OS: Ubuntu, Debian, Alpine (+ Docker containers).
 - Verify or auto-install required binaries.
 
@@ -69,6 +73,8 @@ backup.sh
 ```
 /opt/lndb/
   ├─ backup.sh
+  ├─ trigger_backup.sh
+  ├─ test_encrypt.sh
   ├─ lndb.conf
   ├─ modules/
   │    ├─ cloud.sh
@@ -78,6 +84,17 @@ backup.sh
 ```
 
 ## 5. Phase Planning
+
+### Manual Trigger Flow
+- `trigger_backup.sh` reads `lndb.conf` and issues immediate backup commands.
+- `TRIGGER_MODE=direct` (default) runs `backup.sh` immediately.
+- `TRIGGER_MODE=systemd` issues `systemctl start $SYSTEMD_UNIT_NAME`.
+- `TRIGGER_MODE=signal` sends `DAEMON_SIGNAL` (default `USR1`) to the PID in `DAEMON_PID_FILE` so a long-lived daemon can react.
+
+### Encryption Test Flow
+- `test_encrypt.sh` sources the main script logic and runs only the compression + encryption phases.
+- Outputs land under `TEST_WORK_DIR` (default: `./tmp/test-encrypt`) and respect all crypto settings (`GPG_*`).
+- Use this helper before enabling network transfers to confirm keys and archives are generated correctly.
 
 ### Phase 1 — Local + Mount + Remote Backup
 - **Status:** In progress.
