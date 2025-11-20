@@ -25,27 +25,37 @@ LOG_FILE="$TEST_LOG_FILE"
 setup_logging
 trap 'error_handler $? $LINENO' ERR
 
+say() {
+  local msg="$*"
+  printf '%s [test] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$msg"
+}
+
 TEST_ARCHIVE="$TEST_WORK_DIR/test-$TEST_TIMESTAMP.tar.gz"
 TEST_ENCRYPTED="$TEST_ARCHIVE.gpg"
 
+say "verifying dependencies and GPG key presence"
 require_binaries
 prepare_gpg_material
 ensure_recipient_available
 build_src_targets
 mkdir -p "$(dirname "$TEST_ARCHIVE")"
 
+say "creating test tarball at $TEST_ARCHIVE"
 log "INFO" "creating test tarball at $TEST_ARCHIVE"
 tar -czf "$TEST_ARCHIVE" --absolute-names "${SRC_TARGETS[@]}"
 
+say "encrypting test tarball for $GPG_ENCRYPT_TARGET"
 log "INFO" "encrypting test tarball for $GPG_ENCRYPT_TARGET"
 gpg --batch --yes --trust-model always \
     --recipient "$GPG_ENCRYPT_TARGET" \
     --output "$TEST_ENCRYPTED" \
     --encrypt "$TEST_ARCHIVE"
 
+say "test encryption complete: $TEST_ENCRYPTED"
 log "INFO" "test encryption complete: $TEST_ENCRYPTED"
 du -h "$TEST_ARCHIVE" "$TEST_ENCRYPTED" | while read -r size path; do
+  say "artifact size: $size $path"
   log "INFO" "artifact size: $size $path"
 done
 
-echo "Test artifacts saved under $TEST_WORK_DIR" 1>&2
+say "Test artifacts saved under $TEST_WORK_DIR"
