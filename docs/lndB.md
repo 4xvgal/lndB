@@ -52,7 +52,7 @@
 - Optional automatic package installation (`AUTO_INSTALL_MISSING_BINS`, `PACKAGE_MANAGER_OVERRIDE`) for missing binaries.
 - Backup targets stay tidy via `BASE_CHAIN_DIR` plus `RELATIVE_FILE_TARGETS`, `RELATIVE_DIR_TARGETS`, and optional `EXTRA_TARGETS`.
 - Manual trigger helper `trigger_backup.sh` provides `TRIGGER_MODE` control to run locally, request a systemd unit (`SYSTEMD_UNIT_NAME`), or signal a long-lived daemon (`DAEMON_PID_FILE`, `DAEMON_SIGNAL`).
-- `test_encrypt.sh` exercises compression + encryption only so you can validate artifacts before enabling remote transfers (`TEST_WORK_DIR`, `TEST_LOG_FILE` tunable).
+- Modular scripts (`scripts/key_prepare.sh`, `scripts/list_targets.sh`, `scripts/create_archive.sh`, `scripts/encrypt_archive.sh`) expose each backup stage for isolated debugging, while `test_encrypt.sh` chains them together for manual dry runs (override outputs via `TEST_ARCHIVE_PATH`, `TEST_ENCRYPTED_PATH`).
 - Crypto inputs allow multiple key provisioning paths via `GPG_KEY_SOURCE` (`existing`, `file`, `keyserver`, `url`, or `auto`) plus helpers such as `GPG_PUBLIC_KEY_FILE`, `GPG_KEY_URL`, `GPG_KEYSERVER`, `GPG_KEY_ID`, and `GPG_RECIPIENT_FINGERPRINT`.
 - Supported OS: Ubuntu, Debian, Alpine (+ Docker containers).
 - Verify or auto-install required binaries.
@@ -76,6 +76,12 @@ backup.sh
   ├─ trigger_backup.sh
   ├─ test_encrypt.sh
   ├─ lndb.conf
+  ├─ scripts/
+  │    ├─ common.sh
+  │    ├─ key_prepare.sh
+  │    ├─ list_targets.sh
+  │    ├─ create_archive.sh
+  │    └─ encrypt_archive.sh
   ├─ modules/
   │    ├─ cloud.sh
   │    └─ notify.sh
@@ -92,8 +98,8 @@ backup.sh
 - `TRIGGER_MODE=signal` sends `DAEMON_SIGNAL` (default `USR1`) to the PID in `DAEMON_PID_FILE` so a long-lived daemon can react.
 
 ### Encryption Test Flow
-- `test_encrypt.sh` sources the main script logic and runs only the compression + encryption phases.
-- Outputs land under `TEST_WORK_DIR` (default: `./tmp/test-encrypt`) and respect all crypto settings (`GPG_*`).
+- `test_encrypt.sh` now orchestrates the modular scripts: `key_prepare.sh` → `create_archive.sh` → `encrypt_archive.sh`.
+- Override artifact locations via `TEST_ARCHIVE_PATH` / `TEST_ENCRYPTED_PATH` or test stages individually by running the scripts directly (e.g., `scripts/list_targets.sh` to inspect inputs).
 - Use this helper before enabling network transfers to confirm keys and archives are generated correctly.
 
 ### Phase 1 — Local + Mount + Remote Backup
